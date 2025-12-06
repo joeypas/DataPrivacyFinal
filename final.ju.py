@@ -95,6 +95,10 @@ X_test = X_test_scaled.astype(float)
 y_train = y_train.to_numpy().astype(float)
 y_test = y_test.to_numpy().astype(float)
 
+#fix train labels
+y_train = 2 * y_train - 1
+y_test = 2 * y_test - 1
+
 
 # %% [md]
 """
@@ -168,7 +172,8 @@ def gradient_descent(iterations):
 
     for _ in range(iterations):
         theta = theta - avg_grad(theta, X_train, y_train)
-
+        print(f'Training loss: {np.mean(loss(theta, X_train, y_train))}')
+        print(f'Testing loss: {np.mean(loss(theta, X_test, y_test))}\n')
     return theta
 
 theta = gradient_descent(10)
