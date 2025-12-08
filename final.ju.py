@@ -95,8 +95,6 @@ np.sum(model.predict(X_test) == y_test)/X_test.shape[0]
 """
 # %%
 
-theta = np.zeros(X_train.shape[1])
-
 def predict(xi, theta, bias=0.0):
     return np.sign(xi @ theta + bias)
 
@@ -147,36 +145,42 @@ def gradient_descent(iterations):
     return theta, bias
 
 theta, bias = gradient_descent(10)
-assert isinstance(bias, float)
 accuracy(theta, bias)
 
 # %%
-def L2_clip(v, vb, b):
-    g = np.concatenate([v, np.array([vb])])
+def gradient_vec(theta, bias, X, y):
+    y = np.array(y)
+    z = y * (X @ theta + bias)
 
-    norm = np.linalg.norm(g, ord=2)
+    z = np.clip(z, -500, 500)
+    sigma = np.where(z >= 0, 1 / (1 + np.exp(-z)), np.exp(z) / (1 + np.exp(z)))
 
-    if norm > b:
-        g = g * (b / norm)
+    grad_theta = -y[:, np.newaxis] * X * (1 - sigma)[:, np.newaxis]
+    grad_bias = -y * (1 - sigma)
 
-    return g[:-1], g[-1]
+    return grad_theta, grad_bias
+
+# We want to clip all gradients at once for speed
+def L2_clip(gt, gb, b):
+    gs = np.hstack([gt, gb[:, np.newaxis]])
+
+    norms = np.linalg.norm(gs, axis=1, keepdims=True)
+
+    clip_factors = np.minimum(1.0, b / (norms + 1e-10))
+    return gs * clip_factors
 
 
+def grad_sum_vec(theta, bias, X, y, b):
+    gt, gb = gradient_vec(theta, bias, X, y)
 
-def gradient_sum(theta, bias, X, y, b):
-    sum_theta = np.zeros_like(theta)
-    sum_bias = 0.0
+    grads_clipped = L2_clip(gt, gb, b)
 
-    for xi, yi in zip(X, y):
-        gt, gb = gradient(theta, bias, xi, yi)
-        gt_clipped, gb_clipped = L2_clip(gt, gb, b)
-        sum_theta += gt_clipped
-        sum_bias  += gb_clipped
+    sum_grad = np.sum(grads_clipped, axis=0)
+    
+    return sum_grad[:-1], sum_grad[-1]
 
-    return sum_theta, sum_bias
-
-def perform_iter(theta, bias, X, y, b, epsilon, delta):
-    gtheta, gbias = gradient_sum(theta, bias, X, y, b)
+def perform_iter(theta, bias, X, y, b, epsilon, delta, learning_rate):
+    gtheta, gbias = grad_sum_vec(theta, bias, X, y, b)
 
     g = np.concatenate([gtheta, np.array([gbias])])
 
@@ -187,33 +191,38 @@ def perform_iter(theta, bias, X, y, b, epsilon, delta):
 
     n = len(X)
 
-    theta = theta - noisy_theta / n
-    bias = bias - noisy_bias / n
+    theta = theta - learning_rate * noisy_theta / n
+    bias = bias - learning_rate * noisy_bias / n
     return theta, bias
 
 def noisy_gradient_descent(iterations, epsilon, delta):
     theta = np.zeros(X_train.shape[1])
     sensitivity = 5.0
     bias = 0.0
-    
-    noisy_count = laplace_mech(X_train.shape[0], 1, epsilon)
+    learning_rate = 0.5
 
-    for i in range(iterations - 1):
-        perform_iter(theta, bias, X_train, y_train, sensitivity, epsilon, delta)
-    theta, bias = perform_iter(theta, bias, X_train, y_train, sensitivity, epsilon, delta)
+    eps_i = epsilon / (iterations + 1)
+    delta_i = delta / iterations
+    
+    noisy_count = laplace_mech(X_train.shape[0], 1, eps_i)
+
+    for i in range(iterations):
+        theta, bias = perform_iter(theta, bias, X_train, y_train, sensitivity, eps_i, delta_i, learning_rate)
 
     return theta, bias
 
-theta, bias = noisy_gradient_descent(10, 0.1, 1e-5)
-accuracy(theta, bias)
+def get_avg(iters, eps, delta):
+    results = [noisy_gradient_descent(iters, eps, delta) for _ in range(50)]
+    thetas, biases = zip(*results)
+    return np.mean([accuracy(theta, bias) for theta, bias in zip(thetas, biases)])
+
+get_avg(10, 0.1, 1e-5)
 
 # %%
 delta = 1e-5
 
 epsilons = [0.001, 0.003, 0.005, 0.008, 0.01, 0.03, 0.05, 0.08, 0.1]
-results  = [noisy_gradient_descent(10, epsilon, delta) for epsilon in epsilons]
-thetas, biases = zip(*results)
-accs     = [accuracy(theta, bias) for theta, bias in zip(thetas, biases)]
+accs     = [get_avg(10, epsilon, delta) for epsilon in epsilons]
 
 plt.xlabel('Epsilon')
 plt.ylabel('Accuracy')
