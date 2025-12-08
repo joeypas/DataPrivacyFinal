@@ -2,7 +2,6 @@
 import matplotlib.pyplot as plt
 import pandas as pd
 import numpy as np
-from collections import defaultdict
 
 # Some useful utilities
 
@@ -33,12 +32,8 @@ def g_clip(v):
 # Setup
 Here we want to load our dataset, preprocessing, and split into train and test for our model
 """
-
-# %% [md]
-"""
-## Step 1: load the data
-"""
 # %%
+# Step 1: load the data
 default_of_credit_clients = pd.read_csv("default_of_credit_card_clients.csv")
 
 cols = default_of_credit_clients.iloc[0].tolist()
@@ -47,57 +42,33 @@ cols[-1] = "default"
 df = default_of_credit_clients[1:].copy()
 df.columns = cols
 
-df = df.apply(pd.to_numeric, errors="coerce")
-
-# %% [md]
-"""
-## Step 2: Split train/test data
-"""
-# %%
-from sklearn.model_selection import train_test_split
-
 X = df.drop(columns=["default"]).reset_index(drop=True)
 y = df["default"].astype(int)
 
-assert isinstance(X, pd.DataFrame)
-assert isinstance(y, pd.Series)
 
-X = X.reset_index(drop=True)
-y = y.reset_index(drop=True)
-
+# Step 2: Split into training and testing data
 training_size = int(X.shape[0] * 0.8)
 
-X_train = X.iloc[:training_size]
-X_test = X.iloc[training_size:]
+x_train = X[:training_size]
+x_test = X[training_size:]
 
-y_train = y.iloc[:training_size]
-y_test = y.iloc[training_size:]
+y_train = y[:training_size]
+y_test = y[training_size:]
 
-# %% [md]
-"""
 ## Step 3: Convert X_train/X_test to StandardScaler 
-"""
-# %%
 from sklearn.preprocessing import StandardScaler
 
 scaler = StandardScaler()
-X_train_scaled = scaler.fit_transform(X_train)
-X_test_scaled = scaler.fit_transform(X_test)
+X_train = scaler.fit_transform(x_train)
+X_test = scaler.transform(x_test)
 
-# %% [md]
-"""
-## Step 4: Convert to numpy
-"""
+# Step 4: Make sure our labels are correct
+y_train = [(-1 if x == 0 else 1) for x in y_train]
+y_test = [(-1 if x == 0 else 1) for x in y_test]
+
+
 # %%
-X_train = X_train_scaled.astype(float)
-X_test = X_test_scaled.astype(float)
-
-y_train = y_train.to_numpy().astype(float)
-y_test = y_test.to_numpy().astype(float)
-
-#fix train labels
-y_train = 2 * y_train - 1
-y_test = 2 * y_test - 1
+print(X_train[:10], X_test[:10], y_train[:10], y_test[:10])
 
 
 # %% [md]
@@ -108,10 +79,12 @@ differentially private gradient descent model
 """
 
 # %%
+
 from sklearn.linear_model import LogisticRegression
 
-model = LogisticRegression(max_iter=20000).fit(X_train, y_train)
+model = LogisticRegression(max_iter=100).fit(X_train, y_train)
 model.predict(X_test)
+model.intercept_[0], model
 
 # %%
 np.sum(model.predict(X_test) == y_test)/X_test.shape[0]
@@ -124,35 +97,24 @@ np.sum(model.predict(X_test) == y_test)/X_test.shape[0]
 
 theta = np.zeros(X_train.shape[1])
 
-def predict(xi, theta, bias=0):
-    label = np.sign(xi @ theta + bias)
-    return label
+def predict(xi, theta, bias=0.0):
+    return np.sign(xi @ theta + bias)
 
-def accuracy(theta):
-    return np.sum(predict(X_test, theta) == y_test)/X_test.shape[0]
+def accuracy(theta, bias=0.0):
+    return np.sum(predict(X_test, theta, bias) == y_test) / X_test.shape[0]
 
-
+accuracy(model.coef_[0], model.intercept_[0])
 # %% [md]
 """
 # Gradient Descent Model
+
+This differs slightly from what we did in class since including bias seems to make a very big difference
 """
 
 # %%
 
-def loss(theta, xi, yi):
-    exponent = - yi * (xi.dot(theta))
-    return np.log(1 + np.exp(exponent))
-
-# %%
-np.mean([loss(theta, x_i, y_i) for x_i, y_i in zip(X_test, y_test)])
-
-# %%
-def logistic(x):
-    return 1 / (1 + np.exp(-x))
-
-
-def gradient(theta, xi, yi):
-    z = yi * np.dot(xi, theta)
+def gradient(theta, bias, xi, yi):
+    z = yi * (np.dot(xi, theta) + bias)
 
     if z >= 0:
         exp_neg_z = np.exp(-z)
@@ -161,20 +123,98 @@ def gradient(theta, xi, yi):
         exp_z = np.exp(z)
         sigma = exp_z / (1 + exp_z)
 
-    return -yi * xi * (1 - sigma)
+    grad_theta = -yi * xi * (1 - sigma)
+    grad_bias = -yi * (1 - sigma)
+    return grad_theta, grad_bias
 
-def avg_grad(theta, X, y):
-    grads = [gradient(theta, xi, yi) for xi, yi in zip(X, y)]
-    return np.mean(grads, axis=0)
+def avg_grad(theta, bias, X, y):
+    Gt = []
+    Gb = []
+    for xi, yi in zip(X, y):
+        gt, gb = gradient(theta, bias, xi, yi)
+        Gt.append(gt)
+        Gb.append(gb)
+    return np.mean(Gt, axis=0), np.mean(Gb)
 
 def gradient_descent(iterations):
     theta = np.zeros(X_train.shape[1])
+    bias = 0.0
 
     for _ in range(iterations):
-        theta = theta - avg_grad(theta, X_train, y_train)
-        print(f'Training loss: {np.mean(loss(theta, X_train, y_train))}')
-        print(f'Testing loss: {np.mean(loss(theta, X_test, y_test))}\n')
-    return theta
+        gtheta, gbias = avg_grad(theta, bias, X_train, y_train)
+        theta -= gtheta
+        bias -= gbias
+    return theta, bias
 
-theta = gradient_descent(10)
-accuracy(theta)
+theta, bias = gradient_descent(10)
+assert isinstance(bias, float)
+accuracy(theta, bias)
+
+# %%
+def L2_clip(v, vb, b):
+    g = np.concatenate([v, np.array([vb])])
+
+    norm = np.linalg.norm(g, ord=2)
+
+    if norm > b:
+        g = g * (b / norm)
+
+    return g[:-1], g[-1]
+
+
+
+def gradient_sum(theta, bias, X, y, b):
+    sum_theta = np.zeros_like(theta)
+    sum_bias = 0.0
+
+    for xi, yi in zip(X, y):
+        gt, gb = gradient(theta, bias, xi, yi)
+        gt_clipped, gb_clipped = L2_clip(gt, gb, b)
+        sum_theta += gt_clipped
+        sum_bias  += gb_clipped
+
+    return sum_theta, sum_bias
+
+def perform_iter(theta, bias, X, y, b, epsilon, delta):
+    gtheta, gbias = gradient_sum(theta, bias, X, y, b)
+
+    g = np.concatenate([gtheta, np.array([gbias])])
+
+    noisy = gaussian_mech_vec(g, b, epsilon, delta)
+
+    noisy_theta = noisy[:-1]
+    noisy_bias = noisy[-1]
+
+    n = len(X)
+
+    theta = theta - noisy_theta / n
+    bias = bias - noisy_bias / n
+    return theta, bias
+
+def noisy_gradient_descent(iterations, epsilon, delta):
+    theta = np.zeros(X_train.shape[1])
+    sensitivity = 5.0
+    bias = 0.0
+    
+    noisy_count = laplace_mech(X_train.shape[0], 1, epsilon)
+
+    for i in range(iterations - 1):
+        perform_iter(theta, bias, X_train, y_train, sensitivity, epsilon, delta)
+    theta, bias = perform_iter(theta, bias, X_train, y_train, sensitivity, epsilon, delta)
+
+    return theta, bias
+
+theta, bias = noisy_gradient_descent(10, 0.1, 1e-5)
+accuracy(theta, bias)
+
+# %%
+delta = 1e-5
+
+epsilons = [0.001, 0.003, 0.005, 0.008, 0.01, 0.03, 0.05, 0.08, 0.1]
+results  = [noisy_gradient_descent(10, epsilon, delta) for epsilon in epsilons]
+thetas, biases = zip(*results)
+accs     = [accuracy(theta, bias) for theta, bias in zip(thetas, biases)]
+
+plt.xlabel('Epsilon')
+plt.ylabel('Accuracy')
+plt.plot(epsilons, accs);
