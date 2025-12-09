@@ -17,15 +17,6 @@ def gaussian_mech_vec(v, sensitivity, epsilon, delta):
 def pct_error(orig, priv):
     return np.abs(orig - priv)/orig * 100.0
 
-def z_clip(xs, b):
-    return [min(x, b) for x in xs]
-
-def g_clip(v):
-    n = np.linalg.norm(v, ord=2)
-    if n > 1:
-        return v / n
-    else:
-        return v
 
 # %% [md]
 """
@@ -95,6 +86,13 @@ np.sum(model.predict(X_test) == y_test)/X_test.shape[0]
 """
 # %%
 
+# The loss function measures how good our model is. The training goal is to minimize the loss.
+# This is the logistic loss function.
+def loss(theta, bias, xi, yi):
+    exponent = -np.array(yi) * (xi.dot(theta) + bias)
+    exponent = np.clip(exponent, -500, 500)
+    return np.log(1 + np.exp(exponent))
+
 def predict(xi, theta, bias=0.0):
     return np.sign(xi @ theta + bias)
 
@@ -114,6 +112,7 @@ This differs slightly from what we did in class since including bias seems to ma
 def gradient(theta, bias, xi, yi):
     z = yi * (np.dot(xi, theta) + bias)
 
+    z = np.clip(z, -500, 500)
     if z >= 0:
         exp_neg_z = np.exp(-z)
         sigma = 1 / (1 + exp_neg_z)
@@ -126,13 +125,9 @@ def gradient(theta, bias, xi, yi):
     return grad_theta, grad_bias
 
 def avg_grad(theta, bias, X, y):
-    Gt = []
-    Gb = []
-    for xi, yi in zip(X, y):
-        gt, gb = gradient(theta, bias, xi, yi)
-        Gt.append(gt)
-        Gb.append(gb)
-    return np.mean(Gt, axis=0), np.mean(Gb)
+    grads = [gradient(theta, bias, xi, yi) for xi, yi in zip(X, y)]
+    gt, gb = zip(*grads)
+    return np.mean(gt, axis=0), np.mean(gb)
 
 def gradient_descent(iterations):
     theta = np.zeros(X_train.shape[1])
@@ -144,43 +139,103 @@ def gradient_descent(iterations):
         bias -= gbias
     return theta, bias
 
+# %% [md]
+
+# %%
 theta, bias = gradient_descent(10)
 accuracy(theta, bias)
 
 # %%
-def gradient_vec(theta, bias, X, y):
-    y = np.array(y)
-    z = y * (X @ theta + bias)
+# We can also log out steps 
+def gradient_descent_log(iterations):
+    theta = np.zeros(X_train.shape[1])
+    bias = 0.0
 
-    z = np.clip(z, -500, 500)
-    sigma = np.where(z >= 0, 1 / (1 + np.exp(-z)), np.exp(z) / (1 + np.exp(z)))
+    training_loss = []
+    testing_loss = []
+    training_acc = []
+    testing_acc = []
 
-    grad_theta = -y[:, np.newaxis] * X * (1 - sigma)[:, np.newaxis]
-    grad_bias = -y * (1 - sigma)
+    for _ in range(iterations):
+        gtheta, gbias = avg_grad(theta, bias, X_train, y_train)
+        theta -= gtheta
+        bias -= gbias
+        training_loss.append(np.mean(loss(theta, bias, X_train, y_train)))
+        testing_loss.append(np.mean(loss(theta, bias, X_test, y_test)))
+        training_acc.append(accuracy(theta, bias))
+        testing_acc.append(accuracy(theta, bias))
+    return theta, bias, training_loss, testing_loss, training_acc, testing_acc
 
-    return grad_theta, grad_bias
+iterations = 20
 
-# We want to clip all gradients at once for speed
-def L2_clip(gt, gb, b):
-    gs = np.hstack([gt, gb[:, np.newaxis]])
+theta, bias, training_loss, testing_loss, training_acc, testing_acc = gradient_descent_log(iterations)
 
-    norms = np.linalg.norm(gs, axis=1, keepdims=True)
+iterations_range = np.arange(iterations)
 
-    clip_factors = np.minimum(1.0, b / (norms + 1e-10))
-    return gs * clip_factors
+fig, ax1 = plt.subplots(figsize=(8, 5))
+
+# --- Loss on left y-axis ---
+ax1.set_xlabel('Iteration')
+ax1.set_ylabel('Loss', color='tab:blue')
+ax1.plot(iterations_range, training_loss, label='Training Loss', color='tab:blue')
+ax1.plot(iterations_range, testing_loss, label='Testing Loss', color='tab:cyan')
+ax1.tick_params(axis='y', labelcolor='tab:blue')
+
+# --- Accuracy on right y-axis ---
+ax2 = ax1.twinx()
+ax2.set_ylabel('Accuracy', color='tab:green')
+ax2.plot(iterations_range, training_acc, label='Training Accuracy', color='tab:green')
+ax2.plot(iterations_range, testing_acc, label='Testing Accuracy', color='tab:olive')
+ax2.tick_params(axis='y', labelcolor='tab:green')
+
+# Combined legend
+lines, labels = ax1.get_legend_handles_labels()
+lines2, labels2 = ax2.get_legend_handles_labels()
+ax1.legend(lines + lines2, labels + labels2, loc='center right')
+
+plt.title("Loss and Accuracy vs Iterations")
+plt.tight_layout()
+plt.show()
 
 
-def grad_sum_vec(theta, bias, X, y, b):
-    gt, gb = gradient_vec(theta, bias, X, y)
+# %% [md]
+"""
+# Differentially Private Gradient Descent
+Here we want to add gausian noise to both the weights and the bias.
 
-    grads_clipped = L2_clip(gt, gb, b)
+What we are doing here:
+- For clipping:
+    - We have to clip both bias and weights which differs from the textbook since we don't consider bias in the texbook examples
 
-    sum_grad = np.sum(grads_clipped, axis=0)
+"""
+
+# %%
+
+def L2_clip(v, b):
+    norm = np.linalg.norm(v, ord=2)
     
-    return sum_grad[:-1], sum_grad[-1]
+    if norm > b:
+        return b * (v / norm)
+    else:
+        return v
 
-def perform_iter(theta, bias, X, y, b, epsilon, delta, learning_rate):
-    gtheta, gbias = grad_sum_vec(theta, bias, X, y, b)
+def gradient_sum(theta, bias, X, y, bound):
+    sum_theta = np.zeros_like(theta)
+    sum_bias = 0.0
+    for xi, yi in zip(X, y):
+        gt, gb = gradient(theta, bias, xi, yi)
+
+        grad_vec = np.append(gt, gb)
+        clipped = L2_clip(grad_vec, bound)
+
+        sum_theta += clipped[:-1]
+        sum_bias += clipped[-1]
+
+    return sum_theta, sum_bias
+
+
+def perform_iter_priv(theta, bias, X, y, b, epsilon, delta):
+    gtheta, gbias = gradient_sum(theta, bias, X, y, b)
 
     g = np.concatenate([gtheta, np.array([gbias])])
 
@@ -189,41 +244,104 @@ def perform_iter(theta, bias, X, y, b, epsilon, delta, learning_rate):
     noisy_theta = noisy[:-1]
     noisy_bias = noisy[-1]
 
-    n = len(X)
+    n = X_train.shape[0]
 
-    theta = theta - learning_rate * noisy_theta / n
-    bias = bias - learning_rate * noisy_bias / n
+    theta = theta - (noisy_theta / n)
+    bias = bias - (noisy_bias / n)
     return theta, bias
 
 def noisy_gradient_descent(iterations, epsilon, delta):
     theta = np.zeros(X_train.shape[1])
-    sensitivity = 5.0
+    sensitivity = 1.0
     bias = 0.0
-    learning_rate = 0.5
 
     eps_i = epsilon / (iterations + 1)
     delta_i = delta / iterations
     
     noisy_count = laplace_mech(X_train.shape[0], 1, eps_i)
 
+    training_loss = []
+    testing_loss = []
+    training_acc = []
+    testing_acc = []
+
     for i in range(iterations):
-        theta, bias = perform_iter(theta, bias, X_train, y_train, sensitivity, eps_i, delta_i, learning_rate)
+        theta, bias = perform_iter_priv(theta, bias, X_train, y_train, sensitivity, eps_i, delta_i)
+        training_loss.append(np.mean(loss(theta, bias, X_train, y_train)))
+        testing_loss.append(np.mean(loss(theta, bias, X_test, y_test)))
+        training_acc.append(accuracy(theta, bias))
+        testing_acc.append(accuracy(theta, bias))
 
     return theta, bias
 
-def get_avg(iters, eps, delta):
-    results = [noisy_gradient_descent(iters, eps, delta) for _ in range(50)]
-    thetas, biases = zip(*results)
-    return np.mean([accuracy(theta, bias) for theta, bias in zip(thetas, biases)])
-
-get_avg(10, 0.1, 1e-5)
+theta, bias = noisy_gradient_descent(20, 0.1, 1e-5)
+accuracy(theta, bias)
 
 # %%
 delta = 1e-5
 
 epsilons = [0.001, 0.003, 0.005, 0.008, 0.01, 0.03, 0.05, 0.08, 0.1]
-accs     = [get_avg(10, epsilon, delta) for epsilon in epsilons]
+results   = [noisy_gradient_descent(10, epsilon, delta) for epsilon in epsilons]
+accs     = [accuracy(theta, bias) for theta, bias in results]
 
 plt.xlabel('Epsilon')
 plt.ylabel('Accuracy')
 plt.plot(epsilons, accs);
+
+# %%
+def noisy_gradient_descent_log(iterations, epsilon, delta):
+    theta = np.zeros(X_train.shape[1])
+    sensitivity = 1.0
+    bias = 0.0
+
+    eps_i = epsilon / (iterations + 1)
+    delta_i = delta / iterations
+    
+    noisy_count = laplace_mech(X_train.shape[0], 1, eps_i)
+
+    training_loss = []
+    testing_loss = []
+    training_acc = []
+    testing_acc = []
+
+    for i in range(iterations):
+        theta, bias = perform_iter_priv(theta, bias, X_train, y_train, sensitivity, eps_i, delta_i)
+        training_loss.append(np.mean(loss(theta, bias, X_train, y_train)))
+        testing_loss.append(np.mean(loss(theta, bias, X_test, y_test)))
+        training_acc.append(accuracy(theta, bias))
+        testing_acc.append(accuracy(theta, bias))
+
+    return theta, bias, training_loss, testing_loss, training_acc, testing_acc
+
+
+
+iterations = 20
+
+theta, bias, training_loss, testing_loss, training_acc, testing_acc = noisy_gradient_descent_log(iterations, 0.1, 1e-5)
+
+iterations_range = np.arange(iterations)
+
+fig, ax1 = plt.subplots(figsize=(8, 5))
+
+# --- Loss on left y-axis ---
+ax1.set_xlabel('Iteration')
+ax1.set_ylabel('Loss', color='tab:blue')
+ax1.plot(iterations_range, training_loss, label='Training Loss', color='tab:blue')
+ax1.plot(iterations_range, testing_loss, label='Testing Loss', color='tab:cyan')
+ax1.tick_params(axis='y', labelcolor='tab:blue')
+
+# --- Accuracy on right y-axis ---
+ax2 = ax1.twinx()
+ax2.set_ylabel('Accuracy', color='tab:green')
+ax2.plot(iterations_range, training_acc, label='Training Accuracy', color='tab:green')
+ax2.plot(iterations_range, testing_acc, label='Testing Accuracy', color='tab:olive')
+ax2.tick_params(axis='y', labelcolor='tab:green')
+
+# Combined legend
+lines, labels = ax1.get_legend_handles_labels()
+lines2, labels2 = ax2.get_legend_handles_labels()
+ax1.legend(lines + lines2, labels + labels2, loc='center right')
+
+plt.title("Loss and Accuracy vs Iterations")
+plt.tight_layout()
+plt.show()
